@@ -1,0 +1,206 @@
+#!/bin/bash
+#
+# Script Name: marker
+# Author: Mustaki Oren
+# Date: 15.12.2024
+# Description: This script highlights specific words or lines in text output or a file with various colors.
+# The script reads input either from a file or from the standard input stream and applies color formatting based on user-defined options.
+# Users can specify color for each word, match exact strings, whole words, or entire lines, and choose from a set of predefined colors (blue, cyan, green, purple, red, yellow).
+# Additionally, the script supports case-insensitive matching and custom word boundaries.
+
+# Copyright (c) 2024 Mustaki Oren
+# License: <License information, if applicable>
+#
+# Change Log:
+# <Date> - <Changes made or features added>
+#
+# Dependencies: bash >= 4.0
+#
+set -eu
+
+usage() {
+echo -en "
+Usage: ${0##*/} [FILE] [OPTIONS]
+cat [FILE] | ${0##*/} [OPTIONS]
+
+Color words in output passed from pipe or from reading a file.
+
+Colors shades
+    -b|--blue          Highlight Single or multiple words in shades of blue
+    -c|--cyan          Highlight Single or multiple words in shades of cyan
+    -g|--green         Highlight Single or multiple words in shades of green
+    -p|--purple        Highlight Single or multiple words in shades of purple
+    -r|--red           Highlight Single or multiple words in shades of red
+    -y|--yellow        Highlight Single or multiple words in shades of yellow
+
+Word boundries
+Default :
+    -w0|--exact_word : Match exact string
+Other boundries options:    
+    -w|-w1|--whole_word   Match a word that begins with string
+    -l|-w2|--whole_line   Match a string to the end of the line
+
+
+
+    -f|--file          Explicitly selecting a path to file
+    -i|--icase         Case insensitive
+    -h|--help          This Message
+
+Examples:
+cat /proc/cpuinfo | ${0##*/} -r processor -c \"model name\" -g vendor_id -y microcode -p1 \"cpu family\"
+cat /etc/os-release | ${0##*/} -r1 VERSION -c linux
+cat /etc/os-release | ${0##*/} -r1 VERSION -g id -c NAME
+cat /var/log/slurm/slurmctld | ${0##*/} -e err warn fail -g "Spawning health check" "backup controller .* responding"
+
+# TODO not all numbers are converted to colors
+#  -g {10..59}
+
+"
+}
+
+[ "$#" == "0" ] && usage && exit 1
+
+FILE=""
+MATCH_RULE=STRING
+ICASE=""
+SED_FILTER=""
+COLOR='\x1b[38;5;'
+RESET="\x1b[0m"
+
+# A dictionary list of words where each word is assigned a color
+#
+# b:blue
+# c:cyan
+# g:green
+# p:purple
+# r:red
+# y:yellow
+# 
+# ["word1"]=="p" # word1 will be assigned purple
+# ["word2"]=="r" # word2 will be assigned red
+# ["word3"]=="g" # word3 will be assigned green
+#
+declare -A COLOR_BY_WORDS=()
+
+# 
+# A dictionary list of shades of colors. each color contain 10 shades
+# blue
+# cyan
+# green
+# purple
+# red
+# yellow
+# 
+declare -A SHADES_OF_COLORS=(
+    ["b"]="${COLOR}33m   ${COLOR}39m   ${COLOR}45m   ${COLOR}51m    ${COLOR}75m   ${COLOR}81m   ${COLOR}87m   ${COLOR}123m  ${COLOR}159m  ${COLOR}195m"
+    ["c"]="${COLOR}45m   ${COLOR}51m   ${COLOR}87m   ${COLOR}123m   ${COLOR}159m  ${COLOR}195m  ${COLOR}159m  ${COLOR}195m"
+    ["g"]="${COLOR}46m   ${COLOR}82m   ${COLOR}83m   ${COLOR}118m   ${COLOR}119m  ${COLOR}120m  ${COLOR}121m  ${COLOR}154m  ${COLOR}155m  ${COLOR}156m"
+    ["p"]="${COLOR}93m   ${COLOR}99m   ${COLOR}105m  ${COLOR}111m   ${COLOR}135m  ${COLOR}141m  ${COLOR}147m  ${COLOR}183m  ${COLOR}219m  ${COLOR}225m"
+    ["r"]="${COLOR}202m  ${COLOR}203m  ${COLOR}204m   ${COLOR}205m  ${COLOR}210m  ${COLOR}211m  ${COLOR}212m  ${COLOR}213m  ${COLOR}217m ${COLOR}196m"
+    ["y"]="${COLOR}226m  ${COLOR}227m  ${COLOR}228m  ${COLOR}229m   ${COLOR}220m  ${COLOR}221m  ${COLOR}222m  ${COLOR}230m  ${COLOR}231m  ${COLOR}184m"
+)
+
+# set -xv
+set +eu
+while [ $# -gt 0 ]
+do
+    case $1 in 
+        -h|--help)
+            usage
+        ;;
+        -f|--file)
+            shift
+            FILE="$1"
+            shift
+        ;;
+        -w|--match_word)
+            MATCH_RULE=WORD
+
+            shift
+        ;;
+        -l|--match_line)
+            MATCH_RULE=LINE
+
+            shift
+        ;;           
+        -i|--icase)
+            ICASE="I"
+            shift
+        ;;                
+        -r|--red|-g|--green|-c|--cyan|-b|--blue|-y|--yellow|-p|--purple)
+            COLOR=${1:1:1} # Extract the color key (r, g, c, etc.). i.e get the first letter of the flag
+            shift
+            while [[ $# -gt 0 && ! $1 =~ ^- ]]; do
+                COLOR_BY_WORDS["$1"]="$COLOR"
+                shift
+            done
+            ;;        
+        *)
+            shift
+        ;;
+    esac
+done
+
+# Create sed filter 
+# Iterate over strings and create sed instructions to highlight the string
+create_filter () {
+        # Set the matching rule based on MATCH_RULE
+    case ${MATCH_RULE} in
+        STRING)
+            local MATCH_REGEX="(WORD_PLACE_HOLDER)"
+            ;;
+        WORD)
+            local MATCH_REGEX="\b(WORD_PLACE_HOLDER[a-zA-Z0-9_]*)\b"
+            ;;
+        LINE)
+            local MATCH_REGEX="(WORD_PLACE_HOLDER.*)$"
+            ;;
+        *)
+            # local MATCH_REGEX="WORD_PLACE_HOLDER"
+            :
+            ;;
+    esac
+
+    C=0
+    # local SED_LINE=()
+    
+    for WORD in "${!COLOR_BY_WORDS[@]}"; do
+
+        local COLOR="${COLOR_BY_WORDS["${WORD}"]}"
+
+        local SHADES_OF_COLOR=( ${SHADES_OF_COLORS["${COLOR}"]} )
+
+        VALUE="$(( C % ${#SHADES_OF_COLOR[@]} ))"
+        SHADE="${SHADES_OF_COLOR[${VALUE}]}"
+
+        # Select matching rules for sed
+        WORD=${MATCH_REGEX//WORD_PLACE_HOLDER/"${WORD}"}
+               
+        SED_FILTER+="s/${WORD}/${SHADE}\1${RESET}/${ICASE}g"$'\n'
+
+        (( C+=1 ))
+    done
+}
+
+if [ -p /dev/stdin ]; then
+    # Read from stdin
+    INPUT="/dev/stdin"
+else
+    # Read from file
+    if [ -z "$FILE" ] || [[ "$FILE" =~ ^- ]]; then
+        echo "Error: Missing file argument after -f|--file"
+        exit 1
+    fi
+    if [ -n "$FILE" ] && [ ! -f "$FILE" ]; then
+        echo "Error: File '$FILE' does not exist or is not accessible."
+        exit 1
+    fi
+    INPUT="${FILE}"
+fi
+
+create_filter
+
+printf "%s" "${SED_FILTER}" > filter.sed
+
+sed -E "${SED_FILTER}" ${INPUT}
+
